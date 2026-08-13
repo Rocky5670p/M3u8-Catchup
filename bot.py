@@ -27,7 +27,7 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "8919139205:AAGTegOnPybSMJlZJ3RwUimjBcnd
 
 app = Client("M3u8_Downloader_Bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-ACTIVE_TASKS = {} # task_id -> {"proc": process, "cancelled": False}
+ACTIVE_TASKS = {} # task_id -> {"proc": process, "cancelled": False, "url": stream_url}
 
 def make_progress_bar(percentage):
     completed = int(percentage / 10)
@@ -208,19 +208,23 @@ async def cancel_task_callback(client, callback_query: CallbackQuery):
     else:
         await callback_query.answer("No active task found.")
 
-# START DOWNLOAD CALLBACK
+# START DOWNLOAD CALLBACK (Fixed Loading Spinner)
 @app.on_callback_query(filters.regex(r"^start_dl\|"))
 async def start_download_callback(client, callback_query: CallbackQuery):
+    # Immediate answer to stop button loading spinner
+    await callback_query.answer("⚡ Starting Download...")
+    
     _, task_id, format_id = callback_query.data.split("|")
     
     if task_id not in ACTIVE_TASKS or ACTIVE_TASKS[task_id]["cancelled"]:
-        await callback_query.answer("Task Expired or Cancelled.")
+        await callback_query.message.edit_text("❌ **Task Expired or Cancelled.**")
         return
 
     stream_url = ACTIVE_TASKS[task_id]["url"]
     output_file = f"Stream_{task_id}.mkv"
 
-    await callback_query.answer("⚡ Starting Download...")
+    # Immediately edit message so user knows process started
+    await callback_query.message.edit_text("🚀 **Initializing Downloader... Please wait...**")
     
     cmd = [
         "yt-dlp",
@@ -235,11 +239,11 @@ async def start_download_callback(client, callback_query: CallbackQuery):
     try:
         ret_code = await download_m3u8_stream(cmd, callback_query.message, task_id)
 
-        if ACTIVE_TASKS[task_id]["cancelled"]:
+        if ACTIVE_TASKS.get(task_id, {}).get("cancelled"):
             return
 
         if ret_code != 0 or not os.path.exists(output_file):
-            await callback_query.message.edit_text("❌ **Download Failed!**")
+            await callback_query.message.edit_text("❌ **Download Failed!** Stream fetch response incomplete.")
             return
 
         await callback_query.message.edit_text("📤 **Preparing to Upload...**")
@@ -265,5 +269,13 @@ async def start_download_callback(client, callback_query: CallbackQuery):
             del ACTIVE_TASKS[task_id]
         gc.collect()
 
+# Dummy Web Server to Fix Render "No open ports detected"
+async def dummy_web_server():
+    port = int(os.environ.get("PORT", 8080))
+    server = await asyncio.start_server(lambda r, w: w.close(), "0.0.0.0", port)
+    await server.serve_forever()
+
 if __name__ == "__main__":
+    loop = asyncio.get_event_loop()
+    loop.create_task(dummy_web_server())
     app.run()
