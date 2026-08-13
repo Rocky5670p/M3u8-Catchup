@@ -223,15 +223,16 @@ async def start_download_callback(client, callback_query: CallbackQuery):
 
     await callback_query.message.edit_text("🚀 **Initializing Downloader... Please wait...**")
     
-    # FIX: Added --hls-prefer-native to bypass ffmpeg network crash on Cloudflare
+    # FIX: Native m3u8 downloader & single fragment to prevent Cloudflare tunnel connection drops
     cmd = [
         "yt-dlp",
         "--newline",
         "--no-check-certificate",
-        "--hls-prefer-native",
+        "--downloader", "m3u8:native",
+        "--hls-use-mpegts",
         "-f", format_id,
-        "--fragment-retries", "10",
-        "--concurrent-fragments", "2",
+        "--fragment-retries", "20",
+        "--concurrent-fragments", "1",
         "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
         stream_url,
         "-o", output_file
