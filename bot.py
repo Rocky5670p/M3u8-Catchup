@@ -5,9 +5,7 @@ import time
 import json
 import asyncio
 
-# -------------------------------------------------------------
-# FIX: Render / Python 3.12+ Event Loop Patch for Pyrogram
-# -------------------------------------------------------------
+# Render / Python 3.12+ Event Loop Patch
 try:
     asyncio.get_event_loop()
 except RuntimeError:
@@ -16,32 +14,35 @@ except RuntimeError:
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 
-# Custom Exception for Upload Cancellation
 class StopTransmission(Exception):
     pass
 
-# Environment Variables
 API_ID = int(os.environ.get("API_ID", "29968148"))
 API_HASH = os.environ.get("API_HASH", "0dc95a4aa9b3514b9db31a4331bf630a")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8919139205:AAGTegOnPybSMJlZJ3RwUimjBcnd4Q8SzFA")
 
 app = Client("M3u8_Downloader_Bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-ACTIVE_TASKS = {} # task_id -> {"proc": process, "cancelled": False, "url": stream_url}
+ACTIVE_TASKS = {} # task_id -> {"proc": process, "cancelled": False, "url": stream_url, "last_error": ""}
 
 def make_progress_bar(percentage):
     completed = int(percentage / 10)
     return "█" * completed + "▒" * (10 - completed)
 
-# 1. STREAM QUALITY FETCHER
 async def fetch_stream_qualities(stream_url):
-    cmd = ["yt-dlp", "--dump-json", "--user-agent", "JioTV", stream_url]
+    cmd = [
+        "yt-dlp",
+        "--dump-json",
+        "--no-check-certificate",
+        "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        stream_url
+    ]
     try:
         process = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            limit=1024 * 1024 * 10  # 10 MB Buffer
+            limit=1024 * 1024 * 10
         )
         stdout, stderr = await process.communicate()
     except Exception:
@@ -68,7 +69,6 @@ async def fetch_stream_qualities(stream_url):
     except Exception:
         return [{"id": "best", "label": "Best Quality"}]
 
-# 2. UPLOAD PROGRESS CALLBACK WITH CANCEL BUTTON
 async def upload_progress(current, total, message, start_time, file_name, task_id):
     if task_id in ACTIVE_TASKS and ACTIVE_TASKS[task_id].get("cancelled"):
         raise StopTransmission()
@@ -96,13 +96,12 @@ async def upload_progress(current, total, message, start_time, file_name, task_i
     except Exception:
         pass
 
-# 3. DOWNLOAD RUNNER WITH LIVE PROGRESS & CANCEL BUTTON
 async def download_m3u8_stream(cmd, message, task_id):
     process = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
-        limit=1024 * 1024 * 10  # 10 MB Buffer
+        limit=1024 * 1024 * 10
     )
     
     ACTIVE_TASKS[task_id]["proc"] = process
@@ -126,6 +125,9 @@ async def download_m3u8_stream(cmd, message, task_id):
             break
             
         clean_line = ansi_escape.sub('', line.decode('utf-8', errors='ignore')).strip()
+
+        if "ERROR:" in clean_line:
+            ACTIVE_TASKS[task_id]["last_error"] = clean_line
 
         if "[download]" in clean_line and "%" in clean_line:
             now = time.time()
@@ -158,7 +160,6 @@ async def download_m3u8_stream(cmd, message, task_id):
 async def start_cmd(client, message):
     await message.reply_text("🔥 **M3U8 ADVANCED CATCHUP DOWNLOADER** 🔥\n\nDirect Stream / Catchup `.m3u8` link bhejo!")
 
-# LINK HANDLER & QUALITY SELECTION
 @app.on_message(filters.regex(r"https?://[^\s]+"))
 async def link_handler(client, message):
     stream_url = message.text.strip()
@@ -171,7 +172,7 @@ async def link_handler(client, message):
         return
 
     task_id = str(int(time.time()))
-    ACTIVE_TASKS[task_id] = {"url": stream_url, "cancelled": False}
+    ACTIVE_TASKS[task_id] = {"url": stream_url, "cancelled": False, "last_error": ""}
 
     buttons = []
     row = []
@@ -191,7 +192,6 @@ async def link_handler(client, message):
         reply_markup=InlineKeyboardMarkup(buttons)
     )
 
-# CANCEL TASK CALLBACK
 @app.on_callback_query(filters.regex(r"^cancel_task\|"))
 async def cancel_task_callback(client, callback_query: CallbackQuery):
     task_id = callback_query.data.split("|")[1]
@@ -208,10 +208,8 @@ async def cancel_task_callback(client, callback_query: CallbackQuery):
     else:
         await callback_query.answer("No active task found.")
 
-# START DOWNLOAD CALLBACK (Fixed Loading Spinner)
 @app.on_callback_query(filters.regex(r"^start_dl\|"))
 async def start_download_callback(client, callback_query: CallbackQuery):
-    # Immediate answer to stop button loading spinner
     await callback_query.answer("⚡ Starting Download...")
     
     _, task_id, format_id = callback_query.data.split("|")
@@ -223,15 +221,16 @@ async def start_download_callback(client, callback_query: CallbackQuery):
     stream_url = ACTIVE_TASKS[task_id]["url"]
     output_file = f"Stream_{task_id}.mkv"
 
-    # Immediately edit message so user knows process started
     await callback_query.message.edit_text("🚀 **Initializing Downloader... Please wait...**")
     
     cmd = [
         "yt-dlp",
         "--newline",
+        "--no-check-certificate",
         "-f", format_id,
-        "--concurrent-fragments", "5",
-        "--user-agent", "JioTV",
+        "--fragment-retries", "10",
+        "--concurrent-fragments", "2",
+        "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
         stream_url,
         "-o", output_file
     ]
@@ -243,7 +242,8 @@ async def start_download_callback(client, callback_query: CallbackQuery):
             return
 
         if ret_code != 0 or not os.path.exists(output_file):
-            await callback_query.message.edit_text("❌ **Download Failed!** Stream fetch response incomplete.")
+            err_msg = ACTIVE_TASKS[task_id].get("last_error", "Stream fragments download failed.")
+            await callback_query.message.edit_text(f"❌ **Download Failed!**\n\n`{err_msg}`")
             return
 
         await callback_query.message.edit_text("📤 **Preparing to Upload...**")
@@ -269,7 +269,6 @@ async def start_download_callback(client, callback_query: CallbackQuery):
             del ACTIVE_TASKS[task_id]
         gc.collect()
 
-# Dummy Web Server to Fix Render "No open ports detected"
 async def dummy_web_server():
     port = int(os.environ.get("PORT", 8080))
     server = await asyncio.start_server(lambda r, w: w.close(), "0.0.0.0", port)
