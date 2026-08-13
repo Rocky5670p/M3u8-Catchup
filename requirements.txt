@@ -2,4 +2,3 @@ pyrogram
 tgcrypto
 yt-dlp
 requests
-urllib3
