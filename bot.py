@@ -223,10 +223,12 @@ async def start_download_callback(client, callback_query: CallbackQuery):
 
     await callback_query.message.edit_text("🚀 **Initializing Downloader... Please wait...**")
     
+    # FIX: Added --hls-prefer-native to bypass ffmpeg network crash on Cloudflare
     cmd = [
         "yt-dlp",
         "--newline",
         "--no-check-certificate",
+        "--hls-prefer-native",
         "-f", format_id,
         "--fragment-retries", "10",
         "--concurrent-fragments", "2",
