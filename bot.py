@@ -4,6 +4,15 @@ import gc
 import time
 import json
 import asyncio
+
+# -------------------------------------------------------------
+# FIX: Render / Python 3.12+ Event Loop Patch for Pyrogram
+# -------------------------------------------------------------
+try:
+    asyncio.get_event_loop()
+except RuntimeError:
+    asyncio.set_event_loop(asyncio.new_event_loop())
+
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 
@@ -11,6 +20,7 @@ from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQ
 class StopTransmission(Exception):
     pass
 
+# Environment Variables
 API_ID = int(os.environ.get("API_ID", "29968148"))
 API_HASH = os.environ.get("API_HASH", "0dc95a4aa9b3514b9db31a4331bf630a")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8919139205:AAGTegOnPybSMJlZJ3RwUimjBcnd4Q8SzFA")
@@ -23,7 +33,7 @@ def make_progress_bar(percentage):
     completed = int(percentage / 10)
     return "█" * completed + "▒" * (10 - completed)
 
-# 1. STREAM QUALITY FETCHER (Added 10MB Buffer limit)
+# 1. STREAM QUALITY FETCHER
 async def fetch_stream_qualities(stream_url):
     cmd = ["yt-dlp", "--dump-json", "--user-agent", "JioTV", stream_url]
     try:
@@ -58,7 +68,7 @@ async def fetch_stream_qualities(stream_url):
     except Exception:
         return [{"id": "best", "label": "Best Quality"}]
 
-# 2. UPLOAD PROGRESS CALLBACK
+# 2. UPLOAD PROGRESS CALLBACK WITH CANCEL BUTTON
 async def upload_progress(current, total, message, start_time, file_name, task_id):
     if task_id in ACTIVE_TASKS and ACTIVE_TASKS[task_id].get("cancelled"):
         raise StopTransmission()
@@ -86,7 +96,7 @@ async def upload_progress(current, total, message, start_time, file_name, task_i
     except Exception:
         pass
 
-# 3. DOWNLOAD RUNNER WITH --newline FIX AND BUFFER OVERFLOW PROTECTION
+# 3. DOWNLOAD RUNNER WITH LIVE PROGRESS & CANCEL BUTTON
 async def download_m3u8_stream(cmd, message, task_id):
     process = await asyncio.create_subprocess_exec(
         *cmd,
@@ -110,7 +120,6 @@ async def download_m3u8_stream(cmd, message, task_id):
         try:
             line = await process.stdout.readline()
         except ValueError:
-            # Fallback if buffer fills up
             line = await process.stdout.read(2048)
             
         if not line:
@@ -199,7 +208,7 @@ async def cancel_task_callback(client, callback_query: CallbackQuery):
     else:
         await callback_query.answer("No active task found.")
 
-# START DOWNLOAD CALLBACK WITH --newline FLAG
+# START DOWNLOAD CALLBACK
 @app.on_callback_query(filters.regex(r"^start_dl\|"))
 async def start_download_callback(client, callback_query: CallbackQuery):
     _, task_id, format_id = callback_query.data.split("|")
@@ -215,7 +224,7 @@ async def start_download_callback(client, callback_query: CallbackQuery):
     
     cmd = [
         "yt-dlp",
-        "--newline",  # Prevents long carriage-return buffer overrun
+        "--newline",
         "-f", format_id,
         "--concurrent-fragments", "5",
         "--user-agent", "JioTV",
