@@ -23,7 +23,10 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "8919139205:AAGTegOnPybSMJlZJ3RwUimjBcnd
 
 app = Client("M3u8_Downloader_Bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-ACTIVE_TASKS = {} # task_id -> {"proc": process, "cancelled": False, "url": stream_url, "last_error": ""}
+ACTIVE_TASKS = {} # task_id -> {"proc": process, "cancelled": False, "url": stream_url, "last_error": "", "engine": ""}
+
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+REFERER = "https://www.zee5.com/"
 
 def make_progress_bar(percentage):
     completed = int(percentage / 10)
@@ -34,7 +37,8 @@ async def fetch_stream_qualities(stream_url):
         "yt-dlp",
         "--dump-json",
         "--no-check-certificate",
-        "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        "--user-agent", USER_AGENT,
+        "--add-header", f"Referer:{REFERER}",
         stream_url
     ]
     try:
@@ -46,10 +50,10 @@ async def fetch_stream_qualities(stream_url):
         )
         stdout, stderr = await process.communicate()
     except Exception:
-        return None
+        return [{"id": "best", "label": "Best Quality"}]
     
     if process.returncode != 0 or not stdout:
-        return None
+        return [{"id": "best", "label": "Best Auto Quality"}]
         
     try:
         data = json.loads(stdout.decode('utf-8', errors='ignore'))
@@ -96,7 +100,7 @@ async def upload_progress(current, total, message, start_time, file_name, task_i
     except Exception:
         pass
 
-async def download_m3u8_stream(cmd, message, task_id):
+async def download_m3u8_stream(cmd, message, task_id, engine_name):
     process = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.PIPE,
@@ -126,54 +130,99 @@ async def download_m3u8_stream(cmd, message, task_id):
             
         clean_line = ansi_escape.sub('', line.decode('utf-8', errors='ignore')).strip()
 
-        if "ERROR:" in clean_line:
+        if "ERROR:" in clean_line or "error" in clean_line.lower():
             ACTIVE_TASKS[task_id]["last_error"] = clean_line
 
-        if "[download]" in clean_line and "%" in clean_line:
-            now = time.time()
-            if now - last_update >= 3:
-                match = re.search(r'(\d+\.\d+)%\s+of\s+~\s*([\d\.]+\w+)\s+at\s+([\d\.]+\w+/s)', clean_line)
-                if match:
-                    pct = float(match.group(1))
-                    size = match.group(2)
-                    speed = match.group(3)
-                    bar = make_progress_bar(pct)
+        # Progress reporting logic for various engines
+        now = time.time()
+        if now - last_update >= 3:
+            # yt-dlp match
+            match_ytdlp = re.search(r'(\d+\.\d+)%\s+of\s+~\s*([\d\.]+\w+)\s+at\s+([\d\.]+\w+/s)', clean_line)
+            # N_m3u8DL-RE match
+            match_re = re.search(r'(\d+\.\d+)%\s+([0-9\.]+\s*[M|K|G]?B/s)', clean_line)
+            
+            if match_ytdlp:
+                pct = float(match_ytdlp.group(1))
+                bar = make_progress_bar(pct)
+                text = (
+                    f"📥 **DOWNLOADING STREAM** ({engine_name})\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"[{bar}] `{pct:.1f}%`\n"
+                    f"⚡ **Speed:** `{match_ytdlp.group(3)}`\n"
+                    f"📦 **Size:** `{match_ytdlp.group(2)}`"
+                )
+            elif match_re:
+                pct = float(match_re.group(1))
+                bar = make_progress_bar(pct)
+                text = (
+                    f"📥 **DOWNLOADING STREAM** ({engine_name})\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"[{bar}] `{pct:.1f}%`\n"
+                    f"⚡ **Speed:** `{match_re.group(2)}`"
+                )
+            else:
+                text = (
+                    f"📥 **RECORDING STREAM IN PROGRESS**\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"⚙️ **Engine:** `{engine_name}`\n"
+                    f"⏳ Capturing segments live..."
+                )
 
-                    text = (
-                        f"📥 **DOWNLOADING CATCHUP STREAM**\n"
-                        f"━━━━━━━━━━━━━━━━━━━━━\n"
-                        f"[{bar}] `{pct:.1f}%`\n"
-                        f"⚡ **Speed:** `{speed}`\n"
-                        f"📦 **Approx Size:** `{size}`"
-                    )
-                    markup = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel Task", callback_data=f"cancel_task|{task_id}")]])
-                    try:
-                        await message.edit_text(text, reply_markup=markup)
-                        last_update = now
-                    except Exception:
-                        pass
+            markup = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel Task", callback_data=f"cancel_task|{task_id}")]])
+            try:
+                await message.edit_text(text, reply_markup=markup)
+                last_update = now
+            except Exception:
+                pass
 
     await process.wait()
     return process.returncode
 
 @app.on_message(filters.command("start"))
 async def start_cmd(client, message):
-    await message.reply_text("🔥 **M3U8 ADVANCED CATCHUP DOWNLOADER** 🔥\n\nDirect Stream / Catchup `.m3u8` link bhejo!")
+    await message.reply_text("🔥 **MULTI-ENGINE ADVANCED M3U8 RECORDER** 🔥\n\nBhejiye direct `.m3u8` ya Live Stream link!")
 
 @app.on_message(filters.regex(r"https?://[^\s]+"))
 async def link_handler(client, message):
     stream_url = message.text.strip()
-    status_msg = await message.reply_text("🔍 **Fetching Stream Qualities...**\n`Validating if stream is supported...`")
+    task_id = str(int(time.time()))
+    ACTIVE_TASKS[task_id] = {"url": stream_url, "cancelled": False, "last_error": "", "engine": "ytdlp"}
+
+    # Step 1: Select Engine First
+    buttons = [
+        [
+            InlineKeyboardButton("⚡ N_m3u8DL-RE (Fastest)", callback_data=f"engine|{task_id}|nm3u8dl"),
+            InlineKeyboardButton("🎬 Streamlink (AIO)", callback_data=f"engine|{task_id}|streamlink")
+        ],
+        [
+            InlineKeyboardButton("🛠 FFmpeg Engine", callback_data=f"engine|{task_id}|ffmpeg"),
+            InlineKeyboardButton("📥 yt-dlp Native", callback_data=f"engine|{task_id}|ytdlp")
+        ],
+        [InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_task|{task_id}")]
+    ]
+
+    await message.reply_text(
+        f"⚙️ **Select Recording Engine:**\n\n"
+        f"🔗 **URL:** `{stream_url[:50]}...`\n\n"
+        f"💡 *Tip: Complex PHP/Zee5 links ke liye `Streamlink` ya `N_m3u8DL-RE` use karein.*",
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
+
+@app.on_callback_query(filters.regex(r"^engine\|"))
+async def select_engine_callback(client, callback_query: CallbackQuery):
+    _, task_id, engine = callback_query.data.split("|")
     
+    if task_id not in ACTIVE_TASKS or ACTIVE_TASKS[task_id]["cancelled"]:
+        await callback_query.message.edit_text("❌ **Task Expired or Cancelled.**")
+        return
+        
+    ACTIVE_TASKS[task_id]["engine"] = engine
+    stream_url = ACTIVE_TASKS[task_id]["url"]
+    
+    await callback_query.message.edit_text(f"🔍 **Fetching Qualities with engine:** `{engine.upper()}`...")
+
     qualities = await fetch_stream_qualities(stream_url)
     
-    if not qualities:
-        await status_msg.edit_text("❌ **Stream Not Supported!**\n\nLink invalid hai, stream offline hai, ya DRM encryption hai.")
-        return
-
-    task_id = str(int(time.time()))
-    ACTIVE_TASKS[task_id] = {"url": stream_url, "cancelled": False, "last_error": ""}
-
     buttons = []
     row = []
     for q in qualities:
@@ -187,8 +236,8 @@ async def link_handler(client, message):
         
     buttons.append([InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_task|{task_id}")])
 
-    await status_msg.edit_text(
-        f"✅ **Stream Supported!**\n\nChoose preferred Download Quality:",
+    await callback_query.message.edit_text(
+        f"✅ **Engine Set:** `{engine.upper()}`\n\nChoose preferred Quality:",
         reply_markup=InlineKeyboardMarkup(buttons)
     )
 
@@ -219,43 +268,80 @@ async def start_download_callback(client, callback_query: CallbackQuery):
         return
 
     stream_url = ACTIVE_TASKS[task_id]["url"]
+    engine = ACTIVE_TASKS[task_id].get("engine", "ytdlp")
     output_file = f"Stream_{task_id}.mkv"
 
-    await callback_query.message.edit_text("🚀 **Initializing Downloader... Please wait...**")
-    
-    # FIX: Native m3u8 downloader & single fragment to prevent Cloudflare tunnel connection drops
-    cmd = [
-        "yt-dlp",
-        "--newline",
-        "--no-check-certificate",
-        "--downloader", "m3u8:native",
-        "--hls-use-mpegts",
-        "-f", format_id,
-        "--fragment-retries", "20",
-        "--concurrent-fragments", "1",
-        "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-        stream_url,
-        "-o", output_file
-    ]
+    await callback_query.message.edit_text(f"🚀 **Initializing {engine.upper()} Engine...**")
+
+    # Command builder according to user selection
+    if engine == "nm3u8dl":
+        cmd = [
+            "N_m3u8DL-RE",
+            stream_url,
+            "-H", f"User-Agent: {USER_AGENT}",
+            "-H", f"Referer: {REFERER}",
+            "--save-name", f"Stream_{task_id}",
+            "--auto-select",
+            "--tmp-dir", ".",
+            "--save-dir", ".",
+            "-M", "format=mkv:muxer=ffmpeg"
+        ]
+    elif engine == "streamlink":
+        cmd = [
+            "streamlink",
+            "--http-header", f"User-Agent={USER_AGENT}",
+            "--http-header", f"Referer={REFERER}",
+            "--default-stream", "best",
+            stream_url,
+            "-o", output_file
+        ]
+    elif engine == "ffmpeg":
+        cmd = [
+            "ffmpeg",
+            "-allowed_extensions", "ALL",
+            "-protocol_whitelist", "file,http,https,tcp,tls,crypto",
+            "-headers", f"User-Agent: {USER_AGENT}\r\nReferer: {REFERER}\r\n",
+            "-i", stream_url,
+            "-c", "copy",
+            output_file
+        ]
+    else: # Default yt-dlp
+        cmd = [
+            "yt-dlp",
+            "--newline",
+            "--no-check-certificate",
+            "--downloader", "m3u8:native",
+            "--hls-use-mpegts",
+            "-f", format_id,
+            "--fragment-retries", "20",
+            "--concurrent-fragments", "1",
+            "--user-agent", USER_AGENT,
+            "--add-header", f"Referer:{REFERER}",
+            stream_url,
+            "-o", output_file
+        ]
 
     try:
-        ret_code = await download_m3u8_stream(cmd, callback_query.message, task_id)
+        ret_code = await download_m3u8_stream(cmd, callback_query.message, task_id, engine.upper())
 
         if ACTIVE_TASKS.get(task_id, {}).get("cancelled"):
             return
 
+        if not os.path.exists(output_file) and os.path.exists(f"Stream_{task_id}.mp4"):
+            output_file = f"Stream_{task_id}.mp4"
+
         if ret_code != 0 or not os.path.exists(output_file):
-            err_msg = ACTIVE_TASKS[task_id].get("last_error", "Stream fragments download failed.")
+            err_msg = ACTIVE_TASKS[task_id].get("last_error", "Download failed with selected engine.")
             await callback_query.message.edit_text(f"❌ **Download Failed!**\n\n`{err_msg}`")
             return
 
-        await callback_query.message.edit_text("📤 **Preparing to Upload...**")
+        await callback_query.message.edit_text("📤 **Preparing to Upload to Telegram...**")
         start_time_stamp = time.time()
 
         await client.send_video(
             chat_id=callback_query.message.chat.id,
             video=output_file,
-            caption=f"📺 **Recording Complete!**",
+            caption=f"📺 **Recording Complete!**\n⚙️ **Engine:** `{engine.upper()}`",
             progress=upload_progress,
             progress_args=(callback_query.message, start_time_stamp, output_file, task_id)
         )
